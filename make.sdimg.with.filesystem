@@ -1,0 +1,169 @@
+#!/bin/sh
+
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+# Author: Huazhi (Hank) GONG <hankgong@gmail.com>
+
+ARG_FILE_FOLDER="$1"
+ARG_OUTPUT_FILE="$2"
+ARG_SDIMG_MB="$3"
+
+
+if [ -z $ARG_FILE_FOLDER ] && [ -d $ARG_FILE_FOLDER ]
+then
+	echo "Please specify the correct folder that stores uboot, kernel and file system..."
+else
+	if [ ! -d $ARG_FILE_FOLDER/bootloader ]; then
+		echo "There is no bootloader folder in $ARG_FILE_FOLDER"
+	fi
+
+	if [ ! -d $ARG_FILE_FOLDER/bootdisk ]; then
+		echo "There is no bootdisk folder in $ARG_FILE_FOLDER"
+	fi
+
+	FILE_SYSTEM=`find $ARG_FILE_FOLDER -type f -name "*.tar.gz"`
+
+	if [ -z $FILE_SYSTEM ]; then
+		echo "Cannot find compressed file system (extention *.tar.gz)."
+	fi
+fi
+
+[ ! -n "$ARG_SDIMG_MB" ] && ARG_SDIMG_MB=2500
+[ ! -f ARG_OUTPUT_FILE ] && ARG_OUTPUT_FILE=./$(echo $ARG_FILE_FOLDER | sed 's/^[.|/]*//;s/[.|/]*$//').sdcard.img
+
+SDIMG_FILE=$ARG_OUTPUT_FILE
+SDIMG_MB=$ARG_SDIMG_MB
+
+echo === Create the empty file ===
+echo "  " $SDIMG_FILE
+
+#clean all data in the image file as 0
+dd if=/dev/zero of=$SDIMG_FILE bs=1M count=$SDIMG_MB > /dev/null 2>&1
+
+echo === Create partitions ===
+#boot partion 32M
+
+PARTITION_BOOT_OFFSET=2048
+PARTITION_ROOT_OFFSET=67582
+
+fdisk $SDIMG_FILE >/dev/null 2>&1 <<EOF
+n
+p
+1
+$PARTITION_BOOT_OFFSET
+$PARTITION_ROOT_OFFSET
+n
+p
+2
+
+
+w
+EOF
+
+
+# parse to get final partition size information
+PARTITION_BOOT_OFFSET=`parted -s $SDIMG_FILE  unit B print | tail -n3 | head -n1 | awk '{print $2}'`
+PARTITION_ROOT_OFFSET=`parted -s $SDIMG_FILE  unit B print | tail -n2 | head -n1 | awk '{print $2}'`
+
+PARTITION_BOOT_OFFSET=${PARTITION_BOOT_OFFSET%B}
+PARTITION_ROOT_OFFSET=${PARTITION_ROOT_OFFSET%B}
+
+# in bytes
+PARTITION_BOOT_SIZE=`parted -s $SDIMG_FILE  unit B print | tail -n3 | head -n1 | awk '{print $4}'`
+PARTITION_ROOT_SIZE=`parted -s $SDIMG_FILE  unit B print | tail -n2 | head -n1 | awk '{print $4}'`
+
+PARTITION_BOOT_SIZE=${PARTITION_BOOT_SIZE%B}
+PARTITION_ROOT_SIZE=${PARTITION_ROOT_SIZE%B}
+
+echo $PARTITION_BOOT_OFFSET $PARTITION_BOOT_SIZE
+echo $PARTITION_ROOT_OFFSET $PARTITION_ROOT_SIZE
+
+# format partitions
+echo === Format partitions ===
+LOOP=`losetup -f`
+
+echo "   boot partition"
+
+losetup $LOOP $SDIMG_FILE -o $PARTITION_BOOT_OFFSET --sizelimit $PARTITION_BOOT_SIZE
+mkfs.vfat $LOOP > /dev/null 2>&1
+sync
+losetup -d $LOOP
+
+sleep 3
+LOOP=`losetup -f`
+
+echo "   root partition"
+
+losetup $LOOP $SDIMG_FILE -o $PARTITION_ROOT_OFFSET --sizelimit $PARTITION_ROOT_SIZE
+mkfs.ext4 $LOOP  > /dev/null 2>&1
+sync
+losetup -d $LOOP
+
+sleep 3
+LOOP=`losetup -f`
+
+echo === Writing bootloader ===
+losetup $LOOP $SDIMG_FILE
+dd if=/dev/zero of=$LOOP bs=1k count=1023 seek=1  > /dev/null 2>&1
+dd if=$ARG_FILE_FOLDER/bootloader/u-boot-sunxi-with-spl.bin of=$LOOP bs=1024 seek=8  > /dev/null 2>&1
+sync
+losetup -d $LOOP
+
+sleep 3
+LOOP=`losetup -f`
+
+umount /mnt/
+
+echo === Copy uboot and kernel ===
+mount -o loop,sizelimit=$PARTITION_BOOT_SIZE,offset=$PARTITION_BOOT_OFFSET $SDIMG_FILE /mnt
+
+cat <<EOT > /mnt/uEnv.txt
+bootargs=console=ttyS0,115200 disp.screen0_output_mode=EDID:1024x768p50 hdmi.audio=EDID:0 root=/dev/mmcblk0p2 rootfstype=ext4 elevator=deadline rootwait
+aload_script=fatload mmc 0 0x43000000 script.bin;
+aload_kernel=fatload mmc 0 0x48000000 uImage;bootm 0x48000000;
+uenvcmd=run aload_script aload_kernel
+EOT
+
+# cp $SYSFILE/kernel/uImage /mnt
+# cp $SYSFILE/kernel/script.bin /mnt
+
+cp $ARG_FILE_FOLDER/bootdisk/* /mnt/
+sync
+
+umount /mnt/
+
+echo === debianroot for filesystem ===
+mount -o loop,sizelimit=$PARTITION_ROOT_SIZE,offset=$PARTITION_ROOT_OFFSET $SDIMG_FILE /mnt
+
+tar xzvpf $FILE_SYSTEM -C /mnt/
+
+echo === Copy modules ===
+
+if [ -d $ARG_FILE_FOLDER/rootfs ]; then
+	cp -r $ARG_FILE_FOLDER/rootfs/* /mnt/
+fi
+
+sync
+
+umount /mnt
+
+
+echo === Output ===
+echo
+echo "  " To flash image try command like this one:
+echo partition boot: $PARTITION_BOOT_OFFSET, $PARTITION_BOOT_SIZE
+echo partition root: $PARTITION_ROOT_OFFSET, $PARTITION_ROOT_SIZE
+echo
+echo sudo dd if=$SDIMG_FILE of=/dev/sdX
+echo 
