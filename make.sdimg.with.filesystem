@@ -14,6 +14,17 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 # Author: Huazhi (Hank) GONG <hankgong@gmail.com>
+# 
+# Usage: make.sdimg.with.filesystem ./olimex.a13
+# 
+# All system files should be contained in ./olimex.a13 directory
+# ./olimex.a13-----bootdisk: script.bin, uImage ...
+#            \
+#             \----bootloader: u-boot-sunxi-with-spl.bin
+#              \
+#               \--rootfs: all files will be overwritten in the file system
+#             
+# 
 
 ARG_FILE_FOLDER="$1"
 ARG_OUTPUT_FILE="$2"
